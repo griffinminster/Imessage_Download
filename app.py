@@ -70,10 +70,23 @@ def _contacts_as_dicts():
     return [{"name": n, "identifier": i} for n, i in contacts]
 
 
-def _serialize_messages(rows, tz=LOCAL_TZ):
-    """Convert raw DB rows into a JSON-friendly shape for the bubble viewer."""
+def _serialize_messages(rows, tz=LOCAL_TZ, sender_name_map=None):
+    """Convert raw DB rows into a JSON-friendly shape for the bubble viewer.
+
+    Each row is (apple_ts, is_from_me, text, sender_handle). For group
+    chats, `sender_handle` is the participant's phone/email; passing a
+    `sender_name_map` ({handle_id: display_name}) lets the frontend show
+    a "Asher" label above their bubbles.
+    """
+    sender_name_map = sender_name_map or {}
     out = []
-    for apple_ts, is_from_me, text in rows:
+    for row in rows:
+        # Tolerate both legacy 3-tuples and the new 4-tuples.
+        if len(row) == 4:
+            apple_ts, is_from_me, text, sender_handle = row
+        else:
+            apple_ts, is_from_me, text = row
+            sender_handle = None
         if apple_ts:
             unix_ts = apple_ts / 1_000_000_000 + 978_307_200
             dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc).astimezone(tz)
@@ -82,13 +95,80 @@ def _serialize_messages(rows, tz=LOCAL_TZ):
         else:
             iso = None
             display = "Unknown time"
-        out.append({
+        item = {
             "timestamp": iso,
             "timestamp_display": display,
             "is_from_me": bool(is_from_me),
             "text": text or "",
-        })
+        }
+        if sender_handle and not is_from_me:
+            item["sender_handle"] = sender_handle
+            item["sender_name"] = sender_name_map.get(sender_handle, sender_handle)
+        out.append(item)
     return out
+
+
+def _build_handle_name_map(handles):
+    """Resolve each handle (phone/email) to a display name.
+
+    Order of preference:
+      1. contacts.csv  — handle matches a contact's normalized identifier.
+      2. The cached macOS Address Book — handle matches any of a person's
+         normalized phone/email values. Cache only; never triggers a fetch.
+      3. Fallback: leave unmapped so the raw handle gets shown.
+    """
+    result: dict[str, str] = {}
+    remaining = {h for h in handles if h}
+    if not remaining:
+        return result
+
+    # 1) contacts.csv
+    contacts = load_contacts(DEFAULT_CSV_PATH) or []
+    for name, raw_id in contacts:
+        norm = normalize_identifier(raw_id)
+        if norm in remaining:
+            result[norm] = name
+            remaining.discard(norm)
+
+    if not remaining:
+        return result
+
+    # 2) cached address book (only if already loaded by the Contacts picker)
+    from address_book import _cache as ab_cache  # process-lifetime cache
+    if not ab_cache:
+        return result
+
+    for person in ab_cache:
+        for ph in person.get("phones", []):
+            norm = normalize_identifier(ph["value"])
+            if norm in remaining:
+                result[norm] = person["name"]
+                remaining.discard(norm)
+        for em in person.get("emails", []):
+            val = em["value"].strip()
+            if val in remaining:
+                result[val] = person["name"]
+                remaining.discard(val)
+        if not remaining:
+            break
+
+    return result
+
+
+def _participants_for_group(conn, chat_identifier):
+    """Return the list of handle ids participating in a group chat."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT h.id
+        FROM chat c
+        JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+        JOIN handle h ON chj.handle_id = h.ROWID
+        WHERE c.chat_identifier = ?
+        """,
+        (chat_identifier,),
+    )
+    return [row[0] for row in cur.fetchall()]
 
 
 # ─────────────────────────────────────────────
@@ -178,6 +258,82 @@ def address_book(refresh: int = 0):
 
 
 # ─────────────────────────────────────────────
+#  API: group chats from chat.db
+# ─────────────────────────────────────────────
+
+@app.get("/api/groups")
+def list_groups():
+    """Enumerate every group chat in chat.db, sorted by activity (msgs desc)."""
+    try:
+        check_database_access(DEFAULT_DB_PATH)
+    except DatabaseAccessError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"kind": e.kind, "detail": e.detail},
+        )
+
+    already_added = {
+        normalize_identifier(i)
+        for _, i in (load_contacts(DEFAULT_CSV_PATH) or [])
+        if i.startswith("group:")
+    }
+
+    conn = sqlite3.connect(f"file:{DEFAULT_DB_PATH}?mode=ro", uri=True)
+    groups = []
+    all_handles = set()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                c.chat_identifier,
+                c.display_name,
+                (SELECT GROUP_CONCAT(h.id, char(31))
+                   FROM chat_handle_join chj
+                   JOIN handle h ON chj.handle_id = h.ROWID
+                  WHERE chj.chat_id = c.ROWID) AS participants,
+                (SELECT COUNT(*) FROM chat_message_join cmj
+                  WHERE cmj.chat_id = c.ROWID) AS msg_count
+            FROM chat c
+            WHERE c.chat_identifier LIKE 'chat%'
+            ORDER BY msg_count DESC
+            """
+        )
+        for chat_identifier, display_name, participants_str, msg_count in cur.fetchall():
+            participants = (participants_str or "").split(chr(31)) if participants_str else []
+            participants = [p for p in participants if p]
+            for h in participants:
+                all_handles.add(h)
+            groups.append({
+                "chat_identifier": chat_identifier,
+                "display_name": (display_name or "").strip(),
+                "participants": participants,
+                "message_count": msg_count,
+                "already_added": f"group:{chat_identifier}" in already_added,
+            })
+    finally:
+        conn.close()
+
+    # Resolve participant names so the picker can show real names instead of
+    # raw phones. Uses only what's already in contacts.csv + the address-book
+    # cache (no fresh fetch).
+    name_map = _build_handle_name_map(all_handles)
+    for g in groups:
+        g["participant_names"] = [
+            name_map.get(h, h) for h in g["participants"]
+        ]
+        if not g["display_name"]:
+            # Generate a friendly fallback from the first few participant names.
+            preview = ", ".join(g["participant_names"][:3])
+            extra = len(g["participant_names"]) - 3
+            g["display_name"] = (
+                f"Group: {preview}" + (f" +{extra} more" if extra > 0 else "")
+            )
+
+    return {"groups": groups}
+
+
+# ─────────────────────────────────────────────
 #  API: export
 # ─────────────────────────────────────────────
 
@@ -203,15 +359,22 @@ def run_export_api(payload: ExportIn):
         for name, raw_id in contacts:
             identifier = normalize_identifier(raw_id)
             try:
+                name_map = {}
+                if identifier.startswith("group:"):
+                    chat_id = identifier[len("group:"):]
+                    handles = _participants_for_group(conn, chat_id)
+                    name_map = _build_handle_name_map(handles)
                 export_conversation(
-                    conn, name, identifier, DEFAULT_OUTPUT_DIR, payload.my_name, LOCAL_TZ
+                    conn, name, identifier, DEFAULT_OUTPUT_DIR,
+                    payload.my_name, LOCAL_TZ,
+                    sender_name_map=name_map,
                 )
                 rows = query_messages(conn, identifier)
                 results.append({
                     "name": name,
                     "identifier": identifier,
                     "count": len(rows),
-                    "messages": _serialize_messages(rows),
+                    "messages": _serialize_messages(rows, sender_name_map=name_map),
                     "error": None,
                 })
             except Exception as e:
@@ -278,14 +441,106 @@ def get_conversation(name: str):
     conn = sqlite3.connect(f"file:{DEFAULT_DB_PATH}?mode=ro", uri=True)
     try:
         rows = query_messages(conn, identifier)
+        name_map = {}
+        is_group = identifier.startswith("group:")
+        if is_group:
+            handles = _participants_for_group(conn, identifier[len("group:"):])
+            name_map = _build_handle_name_map(handles)
     finally:
         conn.close()
 
     return {
         "name": contact_name,
         "identifier": identifier,
+        "is_group": is_group,
         "count": len(rows),
-        "messages": _serialize_messages(rows),
+        "messages": _serialize_messages(rows, sender_name_map=name_map),
+    }
+
+
+# ─────────────────────────────────────────────
+#  API: search across exported conversations
+# ─────────────────────────────────────────────
+
+def _safe_filename(name: str) -> str:
+    """Mirror the safe_name logic in export_conversation."""
+    return "".join(c for c in name if c.isalnum() or c in " _-").strip()
+
+
+@app.get("/api/search")
+def search(q: str, contact: str | None = None, offset: int = 0, limit: int = 10):
+    """Search messages in exported conversations for a substring.
+
+    Scope = contacts that have a corresponding .txt file in exports/. If
+    `contact` is supplied, scope narrows to just that one.
+    """
+    query = q.strip()
+    if len(query) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Query must be at least 2 characters.",
+        )
+    needle = query.lower()
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
+    try:
+        check_database_access(DEFAULT_DB_PATH)
+    except DatabaseAccessError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"kind": e.kind, "detail": e.detail},
+        )
+
+    output_dir = Path(DEFAULT_OUTPUT_DIR)
+    exported_stems = (
+        {p.stem for p in output_dir.glob("*.txt")} if output_dir.exists() else set()
+    )
+
+    contacts = load_contacts(DEFAULT_CSV_PATH) or []
+    if contact:
+        targets = [(n, i) for n, i in contacts if n == contact]
+        if not targets:
+            raise HTTPException(status_code=404, detail=f"No contact named {contact!r}.")
+    else:
+        targets = [(n, i) for n, i in contacts if _safe_filename(n) in exported_stems]
+
+    hits = []
+    conn = sqlite3.connect(f"file:{DEFAULT_DB_PATH}?mode=ro", uri=True)
+    try:
+        for name, raw_id in targets:
+            identifier = normalize_identifier(raw_id)
+            rows = query_messages(conn, identifier)
+            if not rows:
+                continue
+            name_map = {}
+            if identifier.startswith("group:"):
+                handles = _participants_for_group(conn, identifier[len("group:"):])
+                name_map = _build_handle_name_map(handles)
+            serialized = _serialize_messages(rows, sender_name_map=name_map)
+            for idx, msg in enumerate(serialized):
+                if needle in msg["text"].lower():
+                    before = serialized[max(0, idx - 3) : idx]
+                    after = serialized[idx + 1 : idx + 4]
+                    hits.append({
+                        "contact_name": name,
+                        "contact_identifier": identifier,
+                        "match_index": idx,
+                        "match": msg,
+                        "before": before,
+                        "after": after,
+                    })
+    finally:
+        conn.close()
+
+    total = len(hits)
+    page = hits[offset : offset + limit]
+    return {
+        "query": query,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hits": page,
     }
 
 

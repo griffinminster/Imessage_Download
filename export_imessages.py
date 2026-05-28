@@ -53,6 +53,12 @@ def normalize_identifier(identifier):
     - Other shapes (short codes, partial international numbers) → just prepend
       + so the existing fallback behavior is preserved.
     """
+    # Group chats use a special "group:<chat_identifier>" form. Keep them
+    # opaque — chat.db stores group chat_identifiers like "chat620531608..."
+    # which already match exactly what we need to query on.
+    if identifier.startswith("group:"):
+        return identifier
+
     if "@" in identifier:
         return identifier
 
@@ -390,79 +396,159 @@ def _extract_attributed_text(blob):
 def query_messages(conn, identifier):
     """Return the raw message rows for one conversation, oldest first.
 
-    Each row is (apple_ts, is_from_me, text). Used by both the .txt writer
-    and the web bubble viewer so the query lives in exactly one place.
+    Each row is (apple_ts, is_from_me, text, sender_handle). Used by both
+    the .txt writer and the web bubble viewer so the query lives in
+    exactly one place.
 
     Messages where `text` is empty but `attributedBody` is set get their
     content decoded from the typedstream blob — this catches the bulk of
     modern (macOS Ventura+) messages.
+
+    For group chats (identifier="group:chat<id>"), `sender_handle` is the
+    raw phone/email of the sender (or None for `is_from_me=1`). For 1:1
+    chats `sender_handle` is always None.
     """
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT
-            m.date,
-            m.is_from_me,
-            m.text,
-            m.attributedBody
-        FROM message m
-        JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-        JOIN chat c ON cmj.chat_id = c.ROWID
-        WHERE c.chat_identifier = ?
-          AND (
-                (m.text IS NOT NULL AND m.text != '')
-             OR m.attributedBody IS NOT NULL
-          )
-        ORDER BY m.date ASC
-        """,
-        (identifier,),
-    )
+    if identifier.startswith("group:"):
+        chat_identifier = identifier[len("group:"):]
+        cursor.execute(
+            """
+            SELECT
+                m.date,
+                m.is_from_me,
+                m.text,
+                m.attributedBody,
+                h.id AS sender_handle
+            FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            JOIN chat c ON cmj.chat_id = c.ROWID
+            LEFT JOIN handle h ON m.handle_id = h.ROWID
+            WHERE c.chat_identifier = ?
+              AND (
+                    (m.text IS NOT NULL AND m.text != '')
+                 OR m.attributedBody IS NOT NULL
+              )
+            ORDER BY m.date ASC
+            """,
+            (chat_identifier,),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT
+                m.date,
+                m.is_from_me,
+                m.text,
+                m.attributedBody,
+                NULL AS sender_handle
+            FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            JOIN chat c ON cmj.chat_id = c.ROWID
+            WHERE c.chat_identifier = ?
+              AND (
+                    (m.text IS NOT NULL AND m.text != '')
+                 OR m.attributedBody IS NOT NULL
+              )
+            ORDER BY m.date ASC
+            """,
+            (identifier,),
+        )
 
     rows = []
-    for apple_ts, is_from_me, text, attr_body in cursor.fetchall():
+    for apple_ts, is_from_me, text, attr_body, sender_handle in cursor.fetchall():
         if not text:
             text = _extract_attributed_text(attr_body)
         if text:
-            rows.append((apple_ts, is_from_me, text))
+            rows.append((apple_ts, is_from_me, text, sender_handle))
     return rows
 
 
-def export_conversation(conn, name, identifier, output_dir, my_name, tz):
-    """Query the DB for one conversation and write it to a formatted text file."""
+def export_conversation(conn, name, identifier, output_dir, my_name, tz,
+                        sender_name_map=None):
+    """Query the DB for one conversation and write it to a formatted text file.
+
+    For group chats, pass `sender_name_map` ({handle_id: display_name}) so the
+    Sender column can show each participant's name; missing handles fall back
+    to the raw phone/email.
+    """
     rows = query_messages(conn, identifier)
 
     if not rows:
         print(f"  ⚠️  No messages found for {name} ({identifier}) — skipping.")
         return
 
+    is_group = identifier.startswith("group:")
+    sender_name_map = sender_name_map or {}
+
     exported_at = datetime.now(tz=tz).strftime("%Y-%m-%d at %I:%M %p %Z").strip()
     total = len(rows)
 
-    their_first = first_name(name)
-    my_first    = first_name(my_name)
+    my_first = first_name(my_name)
 
-    max_name_len = max(len(their_first), len(my_first), len("Sender"))
-    col_w_time   = 20
+    if is_group:
+        # Compute Sender column width from the actual senders we'll write
+        # (resolved first names, falling back to raw handles).
+        def resolve(handle):
+            if handle is None:
+                return my_first
+            return first_name(sender_name_map.get(handle, handle))
+        observed = {resolve(h) for _, _, _, h in rows}
+        observed.add(my_first)
+        max_name_len = max(len(s) for s in observed | {"Sender"})
+    else:
+        their_first = first_name(name)
+        max_name_len = max(len(their_first), len(my_first), len("Sender"))
+
+    col_w_time = 20
 
     def fmt_row(timestamp_str, sender, text):
         sender_padded = sender.ljust(max_name_len)
         return f"{timestamp_str:<{col_w_time}}  {sender_padded} |  {text}"
 
-    lines = [
-        DIVIDER,
-        f"  Conversation with : {name}",
-        f"  Phone / identifier: {identifier}",
-        f"  Exported on       : {exported_at}",
-        f"  Total messages    : {total:,}",
-        DIVIDER,
+    if is_group:
+        # Build a stable participants list from the messages themselves.
+        participants_seen = []
+        seen = set()
+        for _, is_from_me, _, handle in rows:
+            if is_from_me or handle is None or handle in seen:
+                continue
+            seen.add(handle)
+            display = sender_name_map.get(handle, handle)
+            participants_seen.append(display)
+        participants_line = ", ".join(participants_seen) if participants_seen else "(unknown)"
+        header_lines = [
+            DIVIDER,
+            f"  Group chat        : {name}",
+            f"  Participants      : {participants_line}",
+            f"  Exported on       : {exported_at}",
+            f"  Total messages    : {total:,}",
+            DIVIDER,
+        ]
+    else:
+        header_lines = [
+            DIVIDER,
+            f"  Conversation with : {name}",
+            f"  Phone / identifier: {identifier}",
+            f"  Exported on       : {exported_at}",
+            f"  Total messages    : {total:,}",
+            DIVIDER,
+        ]
+
+    lines = header_lines + [
         "",
         fmt_row("Timestamp", "Sender", "Message"),
         "-" * 72,
     ]
 
-    for apple_ts, is_from_me, text in rows:
+    their_first_1to1 = first_name(name) if not is_group else None
+    for apple_ts, is_from_me, text, sender_handle in rows:
         timestamp_str = apple_timestamp_to_local(apple_ts, tz=tz)
-        sender = my_first if is_from_me else their_first
+        if is_from_me:
+            sender = my_first
+        elif is_group:
+            sender = first_name(sender_name_map.get(sender_handle, sender_handle or "?"))
+        else:
+            sender = their_first_1to1
         first_line, *rest = (text or "").split("\n")
         lines.append(fmt_row(timestamp_str, sender, first_line.strip()))
         for extra in rest:

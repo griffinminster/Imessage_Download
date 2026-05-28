@@ -18,6 +18,7 @@
     <button class="tab-btn active" data-tab="contacts">Contacts</button>
     <button class="tab-btn" data-tab="export">Export</button>
     <button class="tab-btn" data-tab="view">Conversations</button>
+    <button class="tab-btn" data-tab="search">Search</button>
   </nav>
 
   <!-- ───── Contacts ───── -->
@@ -43,7 +44,10 @@
     <div class="card">
       <div class="card-header-row">
         <h3>Add a contact</h3>
-        <button type="button" id="open-picker-btn" class="secondary">📇 Import from Contacts</button>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="button" id="open-picker-btn" class="secondary">📇 Import from Contacts</button>
+          <button type="button" id="open-group-picker-btn" class="secondary">👥 Import groups</button>
+        </div>
       </div>
       <form id="add-contact-form" class="row">
         <div class="autocomplete-wrap">
@@ -56,6 +60,43 @@
       <p id="add-error" class="error hidden"></p>
     </div>
   </section>
+
+  <!-- ───── Search ───── -->
+  <section id="tab-search" class="tab-panel">
+    <h2>Search messages</h2>
+    <p class="hint">Searches across every conversation you've exported. Pick a single contact to narrow the scope.</p>
+
+    <div class="card">
+      <form id="search-form" class="search-form">
+        <input type="text" id="search-input" placeholder="Find a word or phrase…" autocomplete="off" />
+        <select id="search-scope">
+          <option value="">All exported conversations</option>
+        </select>
+        <button type="submit">Search</button>
+      </form>
+    </div>
+
+    <div id="search-summary" class="muted" style="padding: 0.25rem 0;"></div>
+    <div id="search-results"></div>
+    <div style="text-align: center; margin-top: 1rem;">
+      <button type="button" id="search-load-more" class="secondary hidden">Load more</button>
+    </div>
+  </section>
+
+  <!-- ───── Group picker modal ───── -->
+  <div id="group-picker-overlay" class="modal-overlay hidden" aria-hidden="true">
+    <div class="modal" role="dialog" aria-labelledby="group-picker-title">
+      <div class="modal-header">
+        <h2 id="group-picker-title">Import group chats</h2>
+        <button type="button" id="group-picker-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="group-picker-search" placeholder="Search groups by name or participant…" autocomplete="off" />
+        <div id="group-picker-status" class="muted" style="padding: 0.5rem 0;"></div>
+        <ul id="group-picker-list" class="picker-list"></ul>
+      </div>
+    </div>
+  </div>
 
   <!-- ───── Contacts picker modal ───── -->
   <div id="picker-overlay" class="modal-overlay hidden" aria-hidden="true">

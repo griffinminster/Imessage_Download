@@ -1,6 +1,6 @@
 // iMessage Exporter — frontend
 //
-// Single-page UI: three tabs (Contacts / Export / Conversations).
+// Single-page UI: four tabs (Contacts / Export / Conversations / Search).
 // Talks to the FastAPI backend via fetch().
 
 const $ = (sel) => document.querySelector(sel);
@@ -12,6 +12,7 @@ function showTab(name) {
   $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
   if (name === "view") loadConversations();
+  if (name === "search") loadSearchScope();
 }
 
 $$(".tab-btn").forEach((btn) =>
@@ -315,6 +316,137 @@ async function onChipClick(chip) {
   }
 }
 
+// --- Group picker modal ---
+
+const groupOverlay = $("#group-picker-overlay");
+const groupList = $("#group-picker-list");
+const groupStatus = $("#group-picker-status");
+const groupSearch = $("#group-picker-search");
+
+let groupsCache = null;
+let groupAddedThisSession = new Set(); // chat_identifiers added since modal opened
+
+$("#open-group-picker-btn").addEventListener("click", openGroupPicker);
+$("#group-picker-close").addEventListener("click", closeGroupPicker);
+groupOverlay.addEventListener("click", (e) => {
+  if (e.target === groupOverlay) closeGroupPicker();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !groupOverlay.classList.contains("hidden")) closeGroupPicker();
+});
+groupSearch.addEventListener("input", () => renderGroupList(groupSearch.value));
+
+async function openGroupPicker() {
+  groupOverlay.classList.remove("hidden");
+  groupOverlay.setAttribute("aria-hidden", "false");
+  groupSearch.value = "";
+  groupStatus.textContent = "Loading group chats…";
+  groupList.innerHTML = "";
+  groupAddedThisSession = new Set();
+  try {
+    const res = await fetch("/api/groups");
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const kind = data.detail?.kind || "unknown";
+      groupStatus.textContent = "";
+      groupList.innerHTML = `<li class="picker-error">${escapeHtml(DB_GUIDANCE[kind] || "Couldn't load groups.")}</li>`;
+      return;
+    }
+    const data = await res.json();
+    groupsCache = data.groups;
+    groupStatus.textContent = `${groupsCache.length.toLocaleString()} group chat${groupsCache.length === 1 ? "" : "s"}`;
+    renderGroupList("");
+    setTimeout(() => groupSearch.focus(), 50);
+  } catch (e) {
+    groupStatus.textContent = "";
+    groupList.innerHTML = `<li class="picker-error">${escapeHtml(e.message || String(e))}</li>`;
+  }
+}
+
+function closeGroupPicker() {
+  groupOverlay.classList.add("hidden");
+  groupOverlay.setAttribute("aria-hidden", "true");
+}
+
+function renderGroupList(query) {
+  if (!groupsCache) return;
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? groupsCache.filter((g) =>
+        g.display_name.toLowerCase().includes(q) ||
+        g.participant_names.some((n) => n.toLowerCase().includes(q))
+      )
+    : groupsCache;
+
+  if (!matches.length) {
+    groupList.innerHTML = `<li class="muted" style="padding: 1rem; text-align: center;">No matches.</li>`;
+    return;
+  }
+
+  const LIMIT = 200;
+  const shown = matches.slice(0, LIMIT);
+  const moreNote =
+    matches.length > LIMIT
+      ? `<li class="muted" style="padding: 0.5rem; text-align: center;">Showing first ${LIMIT} of ${matches.length}. Refine search to narrow.</li>`
+      : "";
+
+  groupList.innerHTML =
+    shown.map((g) => {
+      const added = g.already_added || groupAddedThisSession.has(g.chat_identifier);
+      const namesPreview = g.participant_names.slice(0, 4).join(", ");
+      const extra = g.participant_names.length - 4;
+      const participants = namesPreview + (extra > 0 ? `, +${extra} more` : "");
+      return `
+        <li class="picker-row group-row">
+          <div class="group-row-main" data-chat="${escapeHtml(g.chat_identifier)}" data-name="${escapeHtml(g.display_name)}">
+            <div class="group-row-top">
+              <span class="group-row-name">${escapeHtml(g.display_name)}</span>
+              <span class="group-row-stats">${g.participant_names.length} ppl · ${g.message_count.toLocaleString()} msgs</span>
+            </div>
+            <div class="group-row-participants">${escapeHtml(participants)}</div>
+          </div>
+          <div class="group-row-action">
+            ${added
+              ? `<span class="chip added"><span class="chip-label">added</span></span>`
+              : `<button type="button" class="add-group-btn" data-chat="${escapeHtml(g.chat_identifier)}" data-name="${escapeHtml(g.display_name)}">Add</button>`}
+          </div>
+        </li>
+      `;
+    }).join("") + moreNote;
+
+  groupList.querySelectorAll(".add-group-btn").forEach((btn) =>
+    btn.addEventListener("click", () => onGroupAddClick(btn))
+  );
+}
+
+async function onGroupAddClick(btn) {
+  const chatId = btn.dataset.chat;
+  const name = btn.dataset.name;
+  btn.disabled = true;
+  btn.textContent = "Adding…";
+  try {
+    const res = await fetch("/api/contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, identifier: `group:${chatId}` }),
+    });
+    if (res.ok) {
+      groupAddedThisSession.add(chatId);
+      renderGroupList(groupSearch.value);
+      loadContacts();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      alert(data.detail || "Couldn't add group.");
+      btn.disabled = false;
+      btn.textContent = "Add";
+    }
+  } catch (e) {
+    alert(e.message || String(e));
+    btn.disabled = false;
+    btn.textContent = "Add";
+  }
+}
+
 // --- Autocomplete on the Name input ---
 
 const nameInput = $("#contact-name");
@@ -453,6 +585,7 @@ $("#export-form").addEventListener("submit", async (e) => {
 // ─── Conversation viewer ───────────────────────────────────────
 
 let conversationListCache = [];
+let activeConvName = null;
 
 async function loadConversations() {
   const list = $("#conversation-list");
@@ -469,6 +602,7 @@ async function loadConversations() {
       const li = document.createElement("li");
       li.textContent = c.name;
       li.dataset.name = c.name;
+      if (c.name === activeConvName) li.classList.add("active");
       li.addEventListener("click", () => openConversation(c.name));
       list.appendChild(li);
     }
@@ -477,7 +611,8 @@ async function loadConversations() {
   }
 }
 
-async function openConversation(name) {
+async function openConversation(name, jumpToIndex = null) {
+  activeConvName = name;
   $$("#conversation-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
@@ -496,9 +631,21 @@ async function openConversation(name) {
     }
     const data = await res.json();
     renderChat(pane, data);
+    if (jumpToIndex != null) jumpToBubble(pane, jumpToIndex);
   } catch (e) {
     pane.innerHTML = `<p class="empty-chat">Error: ${escapeHtml(e.message || String(e))}</p>`;
   }
+}
+
+function jumpToBubble(pane, idx) {
+  const target = pane.querySelector(`.bubble-row[data-msg-index="${idx}"]`);
+  if (!target) return;
+  // Defer to next paint so layout is settled before scrolling.
+  requestAnimationFrame(() => {
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    target.classList.add("highlight");
+    setTimeout(() => target.classList.remove("highlight"), 2200);
+  });
 }
 
 function renderChat(pane, data) {
@@ -520,11 +667,13 @@ function renderChat(pane, data) {
   }
 
   let lastTime = null;
+  let lastSender = null;
   const ONE_HOUR_MS = 60 * 60 * 1000;
 
-  for (const m of data.messages) {
+  data.messages.forEach((m, i) => {
     const t = m.timestamp ? new Date(m.timestamp) : null;
-    if (t && (!lastTime || t - lastTime > ONE_HOUR_MS)) {
+    const timeJumped = t && (!lastTime || t - lastTime > ONE_HOUR_MS);
+    if (timeJumped) {
       const divider = document.createElement("div");
       divider.className = "ts-divider";
       divider.textContent = m.timestamp_display;
@@ -532,17 +681,207 @@ function renderChat(pane, data) {
     }
     lastTime = t;
 
+    // Group sender label: show above incoming bubbles only when the sender
+    // changes (or a time gap reset the burst). Skip for me + 1:1 chats.
+    if (!m.is_from_me && m.sender_name) {
+      const isBurstStart = timeJumped || m.sender_name !== lastSender;
+      if (isBurstStart) {
+        const label = document.createElement("div");
+        label.className = "bubble-sender";
+        label.textContent = m.sender_name;
+        pane.appendChild(label);
+      }
+      lastSender = m.sender_name;
+    } else {
+      lastSender = m.is_from_me ? "__me__" : null;
+    }
+
     const row = document.createElement("div");
     row.className = `bubble-row ${m.is_from_me ? "me" : "them"}`;
+    row.dataset.msgIndex = String(i);
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.textContent = m.text;
     bubble.title = m.timestamp_display;
     row.appendChild(bubble);
     pane.appendChild(row);
-  }
+  });
 
   pane.scrollTop = 0;
+}
+
+// ─── Search ─────────────────────────────────────────────────────
+
+const searchForm = $("#search-form");
+const searchInput = $("#search-input");
+const searchScope = $("#search-scope");
+const searchSummary = $("#search-summary");
+const searchResults = $("#search-results");
+const searchLoadMore = $("#search-load-more");
+
+let currentSearch = { query: "", contact: "", offset: 0, total: 0 };
+let searchScopeLoaded = false;
+
+async function loadSearchScope() {
+  // Populate the scope dropdown from /api/conversations once per session.
+  if (searchScopeLoaded) return;
+  try {
+    const res = await fetch("/api/conversations");
+    const data = await res.json();
+    // Keep the first "All exported conversations" option, replace the rest.
+    searchScope.length = 1;
+    for (const c of data.conversations) {
+      const opt = document.createElement("option");
+      opt.value = c.name;
+      opt.textContent = c.name;
+      searchScope.appendChild(opt);
+    }
+    searchScopeLoaded = true;
+  } catch (e) {
+    console.error("Couldn't load scope:", e);
+  }
+}
+
+searchForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = searchInput.value.trim();
+  if (q.length < 2) {
+    searchSummary.textContent = "Enter at least 2 characters.";
+    searchResults.innerHTML = "";
+    searchLoadMore.classList.add("hidden");
+    return;
+  }
+  currentSearch = {
+    query: q,
+    contact: searchScope.value || "",
+    offset: 0,
+    total: 0,
+  };
+  searchResults.innerHTML = "";
+  searchSummary.textContent = "Searching…";
+  searchLoadMore.classList.add("hidden");
+  await fetchSearchPage(true);
+});
+
+searchLoadMore.addEventListener("click", () => fetchSearchPage(false));
+
+async function fetchSearchPage(isFirstPage) {
+  const params = new URLSearchParams({
+    q: currentSearch.query,
+    offset: String(currentSearch.offset),
+    limit: "9",
+  });
+  if (currentSearch.contact) params.set("contact", currentSearch.contact);
+
+  // Show loading state on the Load-more button for subsequent pages.
+  if (!isFirstPage) {
+    searchLoadMore.disabled = true;
+    searchLoadMore.innerHTML = `<span class="spinner"></span>Loading…`;
+  }
+
+  try {
+    const res = await fetch(`/api/search?${params}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      searchSummary.textContent = `Error: ${typeof data.detail === "string" ? data.detail : "search failed"}`;
+      return;
+    }
+    const data = await res.json();
+    currentSearch.total = data.total;
+
+    if (isFirstPage && data.total === 0) {
+      searchSummary.textContent = "";
+      searchResults.innerHTML = `<div class="search-empty">No matches for ${escapeHtml(currentSearch.query)}.</div>`;
+      return;
+    }
+
+    const shownNow = currentSearch.offset + data.hits.length;
+    searchSummary.textContent = `${data.total.toLocaleString()} match${data.total === 1 ? "" : "es"} — showing ${shownNow}`;
+    for (const hit of data.hits) {
+      searchResults.appendChild(renderHit(hit, currentSearch.query));
+    }
+    currentSearch.offset += data.hits.length;
+    if (currentSearch.offset < data.total) {
+      searchLoadMore.classList.remove("hidden");
+      searchLoadMore.textContent = `Load 9 more (${(data.total - currentSearch.offset).toLocaleString()} remaining)`;
+    } else {
+      searchLoadMore.classList.add("hidden");
+    }
+  } catch (e) {
+    searchSummary.textContent = `Error: ${e.message || String(e)}`;
+  } finally {
+    searchLoadMore.disabled = false;
+  }
+}
+
+function renderHit(hit, query) {
+  const card = document.createElement("div");
+  card.className = "search-hit";
+  card.dataset.contact = hit.contact_name;
+  card.dataset.index = String(hit.match_index);
+
+  const header = document.createElement("div");
+  header.className = "hit-header";
+  header.innerHTML = `
+    <span class="hit-contact">${escapeHtml(hit.contact_name)}</span>
+    <span class="hit-ts">${escapeHtml(hit.match.timestamp_display)}</span>
+  `;
+  card.appendChild(header);
+
+  for (const m of hit.before) card.appendChild(renderHitLine(m, "context", query, hit.contact_name));
+  card.appendChild(renderHitLine(hit.match, "match", query, hit.contact_name));
+  for (const m of hit.after) card.appendChild(renderHitLine(m, "context", query, hit.contact_name));
+
+  card.addEventListener("click", () => {
+    showTab("view");
+    openConversation(hit.contact_name, hit.match_index);
+  });
+
+  return card;
+}
+
+function renderHitLine(msg, kind, query, contactName) {
+  const line = document.createElement("div");
+  line.className = `hit-line ${kind}`;
+  const sender = document.createElement("span");
+  sender.className = "sender";
+  sender.textContent = msg.is_from_me ? "me" : contactName.split(" ")[0];
+  const text = document.createElement("span");
+  text.className = "text";
+  if (kind === "match") {
+    text.innerHTML = highlightQuery(msg.text, query);
+  } else {
+    text.textContent = truncate(msg.text, 200);
+  }
+  line.appendChild(sender);
+  line.appendChild(text);
+  return line;
+}
+
+function highlightQuery(text, query) {
+  // Case-insensitive: find every match of `query` in `text` and wrap with <mark>.
+  // We escape the surrounding text and the matched substrings separately, so HTML
+  // metacharacters in the message don't break anything.
+  const lower = text.toLowerCase();
+  const q = query.toLowerCase();
+  const parts = [];
+  let i = 0;
+  while (i < text.length) {
+    const idx = lower.indexOf(q, i);
+    if (idx === -1) {
+      parts.push(escapeHtml(text.slice(i)));
+      break;
+    }
+    if (idx > i) parts.push(escapeHtml(text.slice(i, idx)));
+    parts.push(`<mark>${escapeHtml(text.slice(idx, idx + q.length))}</mark>`);
+    i = idx + q.length;
+  }
+  return parts.join("");
+}
+
+function truncate(s, n) {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
 }
 
 // ─── Utilities ──────────────────────────────────────────────────
