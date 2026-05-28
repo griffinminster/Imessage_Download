@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iMessage Exporter</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>iMessage Exporter</h1>
+    <p class="subtitle">Back up your conversations and view them as chat bubbles.</p>
+  </header>
+
+  <div id="db-banner" class="banner hidden"></div>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="contacts">Contacts</button>
+    <button class="tab-btn" data-tab="export">Export</button>
+    <button class="tab-btn" data-tab="view">Conversations</button>
+  </nav>
+
+  <!-- ───── Contacts ───── -->
+  <section id="tab-contacts" class="tab-panel active">
+    <h2>Your contacts</h2>
+    <p class="hint">These are the conversations that will be exported. Phone numbers will be normalized automatically — include the country code (1 for USA).</p>
+
+    <div class="card">
+      <table id="contacts-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Phone / Email</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="contacts-tbody">
+          <tr><td colspan="3" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Add a contact</h3>
+      <form id="add-contact-form" class="row">
+        <input type="text" id="contact-name" placeholder="Name (e.g. Jane Smith)" required />
+        <input type="text" id="contact-id" placeholder="Phone or email (e.g. +15551234567)" required />
+        <button type="submit">Add</button>
+      </form>
+      <p id="add-error" class="error hidden"></p>
+    </div>
+  </section>
+
+  <!-- ───── Export ───── -->
+  <section id="tab-export" class="tab-panel">
+    <h2>Run an export</h2>
+    <p class="hint">This will pull all messages for every contact and save one read-only <code>.txt</code> file per conversation to <code>exports/</code>. You'll then be able to view them as chat bubbles in the next tab.</p>
+
+    <div class="card">
+      <form id="export-form" class="row">
+        <label for="my-name">Your name (shown on your messages):</label>
+        <input type="text" id="my-name" placeholder="Me" value="Me" required />
+        <button type="submit" id="export-btn">Run export</button>
+      </form>
+      <div id="export-status" class="status"></div>
+    </div>
+  </section>
+
+  <!-- ───── Conversations viewer ───── -->
+  <section id="tab-view" class="tab-panel">
+    <div class="viewer">
+      <aside class="sidebar">
+        <h3>Conversations</h3>
+        <ul id="conversation-list">
+          <li class="muted">No exports yet.</li>
+        </ul>
+      </aside>
+      <main class="chat" id="chat-pane">
+        <p class="empty-chat">Select a conversation on the left.</p>
+      </main>
+    </div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

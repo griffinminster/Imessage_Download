@@ -315,8 +315,12 @@ def _print_unknown(db_path, detail):
 #  Export logic
 # ─────────────────────────────────────────────
 
-def export_conversation(conn, name, identifier, output_dir, my_name, tz):
-    """Query the DB for one conversation and write it to a formatted text file."""
+def query_messages(conn, identifier):
+    """Return the raw message rows for one conversation, oldest first.
+
+    Each row is (apple_ts, is_from_me, text). Used by both the .txt writer
+    and the web bubble viewer so the query lives in exactly one place.
+    """
     cursor = conn.cursor()
     cursor.execute("""
         SELECT
@@ -331,8 +335,12 @@ def export_conversation(conn, name, identifier, output_dir, my_name, tz):
           AND m.text != ''
         ORDER BY m.date ASC
     """, (identifier,))
+    return cursor.fetchall()
 
-    rows = cursor.fetchall()
+
+def export_conversation(conn, name, identifier, output_dir, my_name, tz):
+    """Query the DB for one conversation and write it to a formatted text file."""
+    rows = query_messages(conn, identifier)
 
     if not rows:
         print(f"  ⚠️  No messages found for {name} ({identifier}) — skipping.")

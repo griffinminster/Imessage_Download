@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+contacts.csv
+exports/
+.venv/
+venv/
+.DS_Store

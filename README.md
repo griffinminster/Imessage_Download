@@ -65,6 +65,21 @@ exactly what to do, but here's the gist:
 
 ### 3. Run it
 
+You have two ways to use the tool:
+
+#### Web UI (recommended)
+
+```bash
+pip install -r requirements.txt
+python3 app.py
+```
+
+Your browser opens to `http://127.0.0.1:8765` with a clean interface for
+managing contacts, kicking off exports, and viewing each conversation as
+iMessage-style chat bubbles.
+
+#### Terminal menu
+
 ```bash
 python3 main.py
 ```
