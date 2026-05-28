@@ -41,15 +41,36 @@
     </div>
 
     <div class="card">
-      <h3>Add a contact</h3>
+      <div class="card-header-row">
+        <h3>Add a contact</h3>
+        <button type="button" id="open-picker-btn" class="secondary">📇 Import from Contacts</button>
+      </div>
       <form id="add-contact-form" class="row">
-        <input type="text" id="contact-name" placeholder="Name (e.g. Jane Smith)" required />
+        <div class="autocomplete-wrap">
+          <input type="text" id="contact-name" placeholder="Name (e.g. Jane Smith)" autocomplete="off" required />
+          <ul id="name-suggestions" class="autocomplete-list hidden"></ul>
+        </div>
         <input type="text" id="contact-id" placeholder="Phone or email (e.g. +15551234567)" required />
         <button type="submit">Add</button>
       </form>
       <p id="add-error" class="error hidden"></p>
     </div>
   </section>
+
+  <!-- ───── Contacts picker modal ───── -->
+  <div id="picker-overlay" class="modal-overlay hidden" aria-hidden="true">
+    <div class="modal" role="dialog" aria-labelledby="picker-title">
+      <div class="modal-header">
+        <h2 id="picker-title">Import from Contacts</h2>
+        <button type="button" id="picker-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="picker-search" placeholder="Search your contacts…" autocomplete="off" />
+        <div id="picker-status" class="muted" style="padding: 0.5rem 0;"></div>
+        <ul id="picker-list" class="picker-list"></ul>
+      </div>
+    </div>
+  </div>
 
   <!-- ───── Export ───── -->
   <section id="tab-export" class="tab-panel">

@@ -161,6 +161,176 @@ button.danger {
 button.danger:hover:not(:disabled) {
   background: rgba(215,0,21,0.1);
 }
+button.secondary {
+  background: var(--surface);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+button.secondary:hover:not(:disabled) {
+  background: rgba(0,122,255,0.08);
+}
+button.icon-btn {
+  background: transparent;
+  color: var(--muted);
+  padding: 0.25rem 0.55rem;
+  font-size: 1.1rem;
+}
+button.icon-btn:hover:not(:disabled) {
+  background: rgba(0,0,0,0.05);
+  color: var(--text);
+}
+
+.card-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+.card-header-row h3 { margin: 0; }
+
+/* ─── Autocomplete dropdown ─── */
+
+.autocomplete-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 180px;
+}
+.autocomplete-wrap input { width: 100%; }
+.autocomplete-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 50;
+}
+.autocomplete-list li {
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.95rem;
+}
+.autocomplete-list li:hover,
+.autocomplete-list li.active {
+  background: rgba(0,122,255,0.1);
+}
+.autocomplete-list .ac-name { font-weight: 500; }
+.autocomplete-list .ac-id { color: var(--muted); font-family: ui-monospace, monospace; font-size: 0.85rem; }
+
+/* ─── Modal picker ─── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+.modal {
+  background: var(--surface);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.25);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.modal-header h2 { margin: 0; font-size: 1.15rem; }
+.modal-body {
+  padding: 1rem 1.25rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.modal-body #picker-search { width: 100%; }
+
+.picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.picker-list li.picker-row {
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 0.25rem;
+}
+.picker-list li.picker-row:last-child { border-bottom: none; }
+.picker-name {
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  user-select: none;
+}
+.picker-name:hover { background: rgba(0,122,255,0.08); }
+.picker-name .arrow { color: var(--muted); margin-right: 0.4rem; display: inline-block; width: 0.9rem; }
+.picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.5rem 0.4rem 0.25rem;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.65rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.chip:hover {
+  background: rgba(0,122,255,0.08);
+  border-color: var(--accent);
+}
+.chip.added {
+  background: rgba(29,125,62,0.12);
+  border-color: #1d7d3e;
+  color: #1d7d3e;
+  cursor: default;
+}
+.chip .chip-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: lowercase;
+}
+.chip .chip-value {
+  font-family: ui-monospace, monospace;
+}
+
+.picker-error {
+  background: #fde2e1;
+  border: 1px solid #f5b8b5;
+  color: #7a1a16;
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  font-size: 0.95rem;
+}
 
 .error { color: var(--danger); }
 .hidden { display: none !important; }

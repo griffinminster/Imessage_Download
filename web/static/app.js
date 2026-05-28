@@ -123,6 +123,288 @@ async function removeContact(identifier) {
   else alert("Couldn't remove contact.");
 }
 
+// ─── macOS Contacts picker + autocomplete ──────────────────────
+
+const AB_GUIDANCE = {
+  permission_denied:
+    "Contacts access is blocked. Open System Settings → Privacy & Security → Contacts and enable access for the terminal app running this server, then try again.",
+  contacts_app_missing:
+    "Contacts.app didn't respond. Make sure it's installed and try again.",
+  osascript_missing:
+    "osascript wasn't found — is this actually macOS?",
+  unknown:
+    "Couldn't read Contacts. See the terminal where you started the app for details.",
+};
+
+let addressBookCache = null; // [{name, phones:[{label,value}], emails:[...]}]
+let addressBookPromise = null;
+let pickerExpanded = new Set();
+const ALREADY_ADDED = new Set(); // normalized identifiers already in contacts.csv
+
+async function loadAddressBook(refresh = false) {
+  if (addressBookCache && !refresh) return addressBookCache;
+  if (addressBookPromise && !refresh) return addressBookPromise;
+
+  addressBookPromise = (async () => {
+    const res = await fetch(`/api/address-book${refresh ? "?refresh=1" : ""}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const kind = (data.detail && data.detail.kind) || "unknown";
+      const err = new Error(AB_GUIDANCE[kind] || AB_GUIDANCE.unknown);
+      err.kind = kind;
+      throw err;
+    }
+    const data = await res.json();
+    addressBookCache = data.contacts;
+    return addressBookCache;
+  })();
+
+  try {
+    return await addressBookPromise;
+  } finally {
+    addressBookPromise = null;
+  }
+}
+
+async function refreshAlreadyAddedSet() {
+  try {
+    const res = await fetch("/api/contacts");
+    const data = await res.json();
+    ALREADY_ADDED.clear();
+    for (const c of data.contacts) ALREADY_ADDED.add(c.identifier);
+  } catch (e) { /* no-op */ }
+}
+
+// --- Modal ---
+
+const pickerOverlay = $("#picker-overlay");
+const pickerList = $("#picker-list");
+const pickerStatus = $("#picker-status");
+const pickerSearch = $("#picker-search");
+
+$("#open-picker-btn").addEventListener("click", openPicker);
+$("#picker-close").addEventListener("click", closePicker);
+pickerOverlay.addEventListener("click", (e) => {
+  if (e.target === pickerOverlay) closePicker();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !pickerOverlay.classList.contains("hidden")) closePicker();
+});
+pickerSearch.addEventListener("input", () => renderPickerList(pickerSearch.value));
+
+async function openPicker() {
+  pickerOverlay.classList.remove("hidden");
+  pickerOverlay.setAttribute("aria-hidden", "false");
+  pickerSearch.value = "";
+  pickerExpanded = new Set();
+  pickerStatus.textContent = "Loading your Contacts…";
+  pickerList.innerHTML = "";
+  await refreshAlreadyAddedSet();
+  try {
+    await loadAddressBook();
+    pickerStatus.textContent = `${addressBookCache.length.toLocaleString()} contacts`;
+    renderPickerList("");
+    setTimeout(() => pickerSearch.focus(), 50);
+  } catch (e) {
+    pickerStatus.textContent = "";
+    pickerList.innerHTML = `<li class="picker-error">${escapeHtml(e.message)}</li>`;
+  }
+}
+
+function closePicker() {
+  pickerOverlay.classList.add("hidden");
+  pickerOverlay.setAttribute("aria-hidden", "true");
+}
+
+function renderPickerList(query) {
+  if (!addressBookCache) return;
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? addressBookCache.filter((c) => c.name.toLowerCase().includes(q))
+    : addressBookCache;
+
+  if (!matches.length) {
+    pickerList.innerHTML = `<li class="muted" style="padding: 1rem; text-align: center;">No matches.</li>`;
+    return;
+  }
+
+  // Cap to avoid rendering thousands of rows up front.
+  const LIMIT = 200;
+  const shown = matches.slice(0, LIMIT);
+  const moreNote =
+    matches.length > LIMIT
+      ? `<li class="muted" style="padding: 0.5rem; text-align: center;">Showing first ${LIMIT} of ${matches.length}. Refine search to narrow.</li>`
+      : "";
+
+  pickerList.innerHTML =
+    shown
+      .map((c) => {
+        const isOpen = pickerExpanded.has(c.name);
+        const arrow = isOpen ? "▾" : "▸";
+        return `
+          <li class="picker-row">
+            <div class="picker-name" data-name="${escapeHtml(c.name)}">
+              <span class="arrow">${arrow}</span>${escapeHtml(c.name)}
+            </div>
+            ${isOpen ? renderChips(c) : ""}
+          </li>
+        `;
+      })
+      .join("") + moreNote;
+
+  pickerList.querySelectorAll(".picker-name").forEach((el) =>
+    el.addEventListener("click", () => {
+      const n = el.dataset.name;
+      if (pickerExpanded.has(n)) pickerExpanded.delete(n);
+      else pickerExpanded.add(n);
+      renderPickerList(pickerSearch.value);
+    })
+  );
+
+  pickerList.querySelectorAll(".chip[data-identifier]").forEach((chip) =>
+    chip.addEventListener("click", () => onChipClick(chip))
+  );
+}
+
+function renderChips(contact) {
+  const phones = contact.phones.map((p) => chipHtml(contact.name, p.label, p.value, "phone"));
+  const emails = contact.emails.map((p) => chipHtml(contact.name, p.label, p.value, "email"));
+  const all = [...phones, ...emails];
+  if (!all.length) {
+    return `<div class="picker-chips"><span class="muted">No phones or emails.</span></div>`;
+  }
+  return `<div class="picker-chips">${all.join("")}</div>`;
+}
+
+function chipHtml(name, label, value, kind) {
+  // We don't know the post-normalization identifier client-side, so we just
+  // pass the raw value and let the backend normalize. The chip is marked
+  // "added" only after the POST round-trip succeeds.
+  const cleanLabel = (label || kind).replace(/^_?\$!<|>!\$_?$/g, "").toLowerCase();
+  return `
+    <span class="chip" data-name="${escapeHtml(name)}" data-identifier="${escapeHtml(value)}">
+      <span class="chip-label">${escapeHtml(cleanLabel)}</span>
+      <span class="chip-value">${escapeHtml(value)}</span>
+    </span>
+  `;
+}
+
+async function onChipClick(chip) {
+  if (chip.classList.contains("added")) return;
+  const name = chip.dataset.name;
+  const identifier = chip.dataset.identifier;
+  chip.style.opacity = "0.5";
+  try {
+    const res = await fetch("/api/contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, identifier }),
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const normalized = data.contact?.identifier || identifier;
+      chip.classList.add("added");
+      chip.innerHTML = `<span class="chip-label">added</span><span class="chip-value">${escapeHtml(normalized)}</span>`;
+      loadContacts();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      alert(data.detail || "Couldn't add contact.");
+    }
+  } finally {
+    chip.style.opacity = "";
+  }
+}
+
+// --- Autocomplete on the Name input ---
+
+const nameInput = $("#contact-name");
+const idInput = $("#contact-id");
+const suggestionList = $("#name-suggestions");
+let suggestionIndex = -1;
+
+nameInput.addEventListener("focus", () => maybeShowSuggestions());
+nameInput.addEventListener("input", () => maybeShowSuggestions());
+nameInput.addEventListener("blur", () => {
+  // Delay so a click on a suggestion still fires.
+  setTimeout(hideSuggestions, 150);
+});
+nameInput.addEventListener("keydown", (e) => {
+  const items = suggestionList.querySelectorAll("li");
+  if (!items.length || suggestionList.classList.contains("hidden")) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    suggestionIndex = Math.min(suggestionIndex + 1, items.length - 1);
+    highlightSuggestion(items);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    suggestionIndex = Math.max(suggestionIndex - 1, 0);
+    highlightSuggestion(items);
+  } else if (e.key === "Enter" && suggestionIndex >= 0) {
+    e.preventDefault();
+    items[suggestionIndex].click();
+  } else if (e.key === "Escape") {
+    hideSuggestions();
+  }
+});
+
+async function maybeShowSuggestions() {
+  const q = nameInput.value.trim().toLowerCase();
+  if (q.length < 1) {
+    hideSuggestions();
+    return;
+  }
+  try {
+    await loadAddressBook();
+  } catch (e) {
+    hideSuggestions();
+    return;
+  }
+  if (!addressBookCache) return;
+
+  const matches = addressBookCache
+    .filter((c) => c.name.toLowerCase().includes(q))
+    .slice(0, 8);
+
+  if (!matches.length) {
+    hideSuggestions();
+    return;
+  }
+
+  suggestionList.innerHTML = matches
+    .map((c) => {
+      const firstPhone = c.phones[0]?.value || c.emails[0]?.value || "";
+      return `
+        <li data-name="${escapeHtml(c.name)}" data-id="${escapeHtml(firstPhone)}">
+          <span class="ac-name">${escapeHtml(c.name)}</span>
+          <span class="ac-id">${escapeHtml(firstPhone)}</span>
+        </li>
+      `;
+    })
+    .join("");
+  suggestionList.classList.remove("hidden");
+  suggestionIndex = -1;
+
+  suggestionList.querySelectorAll("li").forEach((li) =>
+    li.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      nameInput.value = li.dataset.name;
+      if (li.dataset.id) idInput.value = li.dataset.id;
+      hideSuggestions();
+      idInput.focus();
+    })
+  );
+}
+
+function highlightSuggestion(items) {
+  items.forEach((li, i) => li.classList.toggle("active", i === suggestionIndex));
+  if (suggestionIndex >= 0) items[suggestionIndex].scrollIntoView({ block: "nearest" });
+}
+
+function hideSuggestions() {
+  suggestionList.classList.add("hidden");
+  suggestionIndex = -1;
+}
+
 // ─── Export ─────────────────────────────────────────────────────
 
 $("#export-form").addEventListener("submit", async (e) => {

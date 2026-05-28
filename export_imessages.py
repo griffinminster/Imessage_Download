@@ -42,13 +42,39 @@ DIVIDER = "=" * 72
 # ─────────────────────────────────────────────
 
 def normalize_identifier(identifier):
-    """Auto-add + prefix to phone numbers if missing. Leaves emails alone."""
+    """Normalize a phone number into the +<country><number> form used by chat.db.
+
+    - Emails are passed through unchanged.
+    - Strips spaces, dashes, parentheses, and dots.
+    - 10-digit input → assumed US, prepends +1  (the common case from
+      Contacts.app, which stores plenty of unformatted local numbers).
+    - 11-digit input starting with 1 → prepends + (already has US country code).
+    - Anything else already starting with + → kept as-is.
+    - Other shapes (short codes, partial international numbers) → just prepend
+      + so the existing fallback behavior is preserved.
+    """
     if "@" in identifier:
         return identifier
-    digits_only = identifier.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-    if not digits_only.startswith("+"):
-        digits_only = "+" + digits_only
-    return digits_only
+
+    cleaned = (
+        identifier.replace(" ", "")
+                  .replace("-", "")
+                  .replace("(", "")
+                  .replace(")", "")
+                  .replace(".", "")
+    )
+
+    if cleaned.startswith("+"):
+        return cleaned
+
+    digits = cleaned.lstrip("+")
+    if digits.isdigit():
+        if len(digits) == 10:
+            return "+1" + digits
+        if len(digits) == 11 and digits.startswith("1"):
+            return "+" + digits
+
+    return "+" + digits
 
 
 def apple_timestamp_to_local(apple_ts, tz=LOCAL_TZ):
@@ -315,27 +341,90 @@ def _print_unknown(db_path, detail):
 #  Export logic
 # ─────────────────────────────────────────────
 
+def _extract_attributed_text(blob):
+    """Pull the message text out of an NSArchiver typedstream attributedBody blob.
+
+    macOS Ventura+ increasingly stores message text in `attributedBody` (a
+    binary NSAttributedString blob) instead of the plain `text` column —
+    sometimes only 0.1% of a conversation has a non-empty `text`. The blob
+    format is NSArchiver's "typedstream": after the `NSString` class name
+    we find a `+` (0x2B) cstring marker, a variable-length length prefix,
+    then the UTF-8 bytes.
+    """
+    if not blob:
+        return None
+    ns_idx = blob.find(b"NSString")
+    if ns_idx == -1:
+        return None
+    plus_idx = blob.find(b"\x2b", ns_idx + len(b"NSString"))
+    if plus_idx == -1:
+        return None
+    p = plus_idx + 1
+    if p >= len(blob):
+        return None
+    first = blob[p]
+    if first < 0x81:
+        length = first
+        text_start = p + 1
+    elif first == 0x81 and p + 2 < len(blob):
+        length = blob[p + 1] | (blob[p + 2] << 8)
+        text_start = p + 3
+    elif first == 0x82 and p + 4 < len(blob):
+        length = (
+            blob[p + 1]
+            | (blob[p + 2] << 8)
+            | (blob[p + 3] << 16)
+            | (blob[p + 4] << 24)
+        )
+        text_start = p + 5
+    else:
+        return None
+    if length <= 0 or text_start + length > len(blob):
+        return None
+    try:
+        return blob[text_start : text_start + length].decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
 def query_messages(conn, identifier):
     """Return the raw message rows for one conversation, oldest first.
 
     Each row is (apple_ts, is_from_me, text). Used by both the .txt writer
     and the web bubble viewer so the query lives in exactly one place.
+
+    Messages where `text` is empty but `attributedBody` is set get their
+    content decoded from the typedstream blob — this catches the bulk of
+    modern (macOS Ventura+) messages.
     """
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT
             m.date,
             m.is_from_me,
-            m.text
+            m.text,
+            m.attributedBody
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         JOIN chat c ON cmj.chat_id = c.ROWID
         WHERE c.chat_identifier = ?
-          AND m.text IS NOT NULL
-          AND m.text != ''
+          AND (
+                (m.text IS NOT NULL AND m.text != '')
+             OR m.attributedBody IS NOT NULL
+          )
         ORDER BY m.date ASC
-    """, (identifier,))
-    return cursor.fetchall()
+        """,
+        (identifier,),
+    )
+
+    rows = []
+    for apple_ts, is_from_me, text, attr_body in cursor.fetchall():
+        if not text:
+            text = _extract_attributed_text(attr_body)
+        if text:
+            rows.append((apple_ts, is_from_me, text))
+    return rows
 
 
 def export_conversation(conn, name, identifier, output_dir, my_name, tz):

@@ -78,6 +78,11 @@ Your browser opens to `http://127.0.0.1:8765` with a clean interface for
 managing contacts, kicking off exports, and viewing each conversation as
 iMessage-style chat bubbles.
 
+The Contacts tab has an **Import from Contacts** button that pulls names and
+phone numbers straight from macOS Contacts.app, plus an autocomplete on the
+Name field. The first time you use either, macOS will pop a one-time
+**"Allow access to Contacts"** prompt — grant it and you're set.
+
 #### Terminal menu
 
 ```bash

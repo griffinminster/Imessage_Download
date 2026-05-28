@@ -36,6 +36,7 @@ from export_imessages import (
     query_messages,
 )
 from add_contacts import load_contacts, save_contacts
+from address_book import AddressBookError, check_access, fetch_address_book
 
 
 HOST = "127.0.0.1"
@@ -149,6 +150,31 @@ def remove_contact(identifier: str):
     if not save_contacts(remaining, DEFAULT_CSV_PATH):
         raise HTTPException(status_code=500, detail="Couldn't save contacts.csv.")
     return {"removed": target, "remaining": len(remaining)}
+
+
+# ─────────────────────────────────────────────
+#  API: macOS Contacts (address book)
+# ─────────────────────────────────────────────
+
+@app.get("/api/address-book/status")
+def address_book_status():
+    try:
+        check_access()
+        return {"ok": True, "kind": None, "detail": None}
+    except AddressBookError as e:
+        return {"ok": False, "kind": e.kind, "detail": e.detail}
+
+
+@app.get("/api/address-book")
+def address_book(refresh: int = 0):
+    try:
+        people = fetch_address_book(refresh=bool(refresh))
+    except AddressBookError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"kind": e.kind, "detail": e.detail},
+        )
+    return {"contacts": people}
 
 
 # ─────────────────────────────────────────────
