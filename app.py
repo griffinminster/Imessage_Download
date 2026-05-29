@@ -108,13 +108,15 @@ def _serialize_messages(rows, tz=LOCAL_TZ, sender_name_map=None):
     return out
 
 
-def _build_handle_name_map(handles):
+def _build_handle_name_map(handles, allow_fetch=False):
     """Resolve each handle (phone/email) to a display name.
 
     Order of preference:
       1. contacts.csv  — handle matches a contact's normalized identifier.
-      2. The cached macOS Address Book — handle matches any of a person's
-         normalized phone/email values. Cache only; never triggers a fetch.
+      2. The macOS Address Book — handle matches any of a person's normalized
+         phone/email values. Uses the process cache by default; if
+         `allow_fetch=True` and the cache is empty, fetches once (~10s on a
+         large book). Useful for group viewer/search where good names matter.
       3. Fallback: leave unmapped so the raw handle gets shown.
     """
     result: dict[str, str] = {}
@@ -133,12 +135,17 @@ def _build_handle_name_map(handles):
     if not remaining:
         return result
 
-    # 2) cached address book (only if already loaded by the Contacts picker)
-    from address_book import _cache as ab_cache  # process-lifetime cache
-    if not ab_cache:
+    # 2) address book — use cache; optionally trigger one-time fetch
+    import address_book as ab
+    if ab._cache is None and allow_fetch:
+        try:
+            ab.fetch_address_book()
+        except ab.AddressBookError:
+            pass  # surface raw handles rather than failing the whole request
+    if not ab._cache:
         return result
 
-    for person in ab_cache:
+    for person in ab._cache:
         for ph in person.get("phones", []):
             norm = normalize_identifier(ph["value"])
             if norm in remaining:
@@ -315,9 +322,9 @@ def list_groups():
         conn.close()
 
     # Resolve participant names so the picker can show real names instead of
-    # raw phones. Uses only what's already in contacts.csv + the address-book
-    # cache (no fresh fetch).
-    name_map = _build_handle_name_map(all_handles)
+    # raw phones. Auto-fetches the address book on first call (~10s on a
+    # large book, cached for the rest of the session).
+    name_map = _build_handle_name_map(all_handles, allow_fetch=True)
     for g in groups:
         g["participant_names"] = [
             name_map.get(h, h) for h in g["participants"]
@@ -401,20 +408,31 @@ def run_export_api(payload: ExportIn):
 
 @app.get("/api/conversations")
 def list_conversations():
-    """List exported .txt files so the sidebar can show what's available."""
+    """List exported .txt files so the sidebar can show what's available.
+
+    Each item carries the contact's **csv name** (which may differ from the
+    .txt filename when the name contained emoji or other stripped chars) so
+    the frontend can fetch the conversation by the canonical name. Also
+    includes `is_group` so the sidebar can split individuals vs groups.
+    """
     output_dir = Path(DEFAULT_OUTPUT_DIR)
     if not output_dir.exists():
         return {"conversations": []}
 
-    contacts = {n: normalize_identifier(i) for n, i in (load_contacts(DEFAULT_CSV_PATH) or [])}
+    # Map .txt stem (after safe_filename) → (csv_name, identifier).
+    by_stem = {}
+    for n, i in (load_contacts(DEFAULT_CSV_PATH) or []):
+        by_stem[_safe_filename(n)] = (n, normalize_identifier(i))
 
     items = []
     for txt in sorted(output_dir.glob("*.txt")):
         stem = txt.stem
-        identifier = contacts.get(stem)
+        csv_name, identifier = by_stem.get(stem, (stem, None))
         items.append({
-            "name": stem,
+            "name": csv_name,
+            "display_name": stem,
             "identifier": identifier,
+            "is_group": bool(identifier and identifier.startswith("group:")),
             "file": txt.name,
         })
     return {"conversations": items}
@@ -423,7 +441,11 @@ def list_conversations():
 @app.get("/api/conversations/{name}")
 def get_conversation(name: str):
     contacts = load_contacts(DEFAULT_CSV_PATH) or []
+    # First try exact match (the common case), then fall back to safe_filename
+    # so the bubble viewer works for groups whose name contains emoji/etc.
     match = next(((n, i) for n, i in contacts if n == name), None)
+    if not match:
+        match = next(((n, i) for n, i in contacts if _safe_filename(n) == name), None)
     if not match:
         raise HTTPException(status_code=404, detail=f"No contact named {name!r}.")
 
@@ -445,7 +467,7 @@ def get_conversation(name: str):
         is_group = identifier.startswith("group:")
         if is_group:
             handles = _participants_for_group(conn, identifier[len("group:"):])
-            name_map = _build_handle_name_map(handles)
+            name_map = _build_handle_name_map(handles, allow_fetch=True)
     finally:
         conn.close()
 
@@ -516,7 +538,7 @@ def search(q: str, contact: str | None = None, offset: int = 0, limit: int = 10)
             name_map = {}
             if identifier.startswith("group:"):
                 handles = _participants_for_group(conn, identifier[len("group:"):])
-                name_map = _build_handle_name_map(handles)
+                name_map = _build_handle_name_map(handles, allow_fetch=True)
             serialized = _serialize_messages(rows, sender_name_map=name_map)
             for idx, msg in enumerate(serialized):
                 if needle in msg["text"].lower():

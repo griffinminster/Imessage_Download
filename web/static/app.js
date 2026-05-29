@@ -11,6 +11,7 @@ const $$ = (sel) => document.querySelectorAll(sel);
 function showTab(name) {
   $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
+  document.body.dataset.activeTab = name;
   if (name === "view") loadConversations();
   if (name === "search") loadSearchScope();
 }
@@ -588,32 +589,46 @@ let conversationListCache = [];
 let activeConvName = null;
 
 async function loadConversations() {
-  const list = $("#conversation-list");
+  const indivList = $("#conversation-list-individuals");
+  const groupList = $("#conversation-list-groups");
   try {
     const res = await fetch("/api/conversations");
     const data = await res.json();
     conversationListCache = data.conversations;
-    if (!data.conversations.length) {
-      list.innerHTML = `<li class="muted">No exports yet — run one from the Export tab.</li>`;
-      return;
-    }
-    list.innerHTML = "";
-    for (const c of data.conversations) {
-      const li = document.createElement("li");
-      li.textContent = c.name;
-      li.dataset.name = c.name;
-      if (c.name === activeConvName) li.classList.add("active");
-      li.addEventListener("click", () => openConversation(c.name));
-      list.appendChild(li);
-    }
+
+    const individuals = data.conversations.filter((c) => !c.is_group);
+    const groups = data.conversations.filter((c) => c.is_group);
+
+    $("#individuals-count").textContent = individuals.length ? `(${individuals.length})` : "";
+    $("#groups-count").textContent = groups.length ? `(${groups.length})` : "";
+
+    renderConvList(indivList, individuals, "No individuals exported yet.");
+    renderConvList(groupList, groups, "No groups exported yet.");
   } catch (e) {
-    list.innerHTML = `<li class="muted">Couldn't load conversations.</li>`;
+    indivList.innerHTML = `<li class="muted">Couldn't load conversations.</li>`;
+    groupList.innerHTML = "";
+  }
+}
+
+function renderConvList(listEl, items, emptyMsg) {
+  if (!items.length) {
+    listEl.innerHTML = `<li class="muted">${emptyMsg}</li>`;
+    return;
+  }
+  listEl.innerHTML = "";
+  for (const c of items) {
+    const li = document.createElement("li");
+    li.textContent = c.display_name || c.name;
+    li.dataset.name = c.name;
+    if (c.name === activeConvName) li.classList.add("active");
+    li.addEventListener("click", () => openConversation(c.name));
+    listEl.appendChild(li);
   }
 }
 
 async function openConversation(name, jumpToIndex = null) {
   activeConvName = name;
-  $$("#conversation-list li").forEach((li) =>
+  $$(".conversation-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
 
@@ -898,6 +913,7 @@ function escapeHtml(s) {
 // ─── Boot ───────────────────────────────────────────────────────
 
 (async function init() {
+  document.body.dataset.activeTab = "contacts";
   await checkDbStatus();
   await loadContacts();
 })();
