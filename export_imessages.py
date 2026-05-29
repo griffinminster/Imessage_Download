@@ -26,9 +26,27 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 
+
+def _user_data_dir():
+    """Where to read/write contacts.csv and exports/.
+
+    When running from source (dev), we keep everything in the repo root so
+    git status is the source of truth. When running as a frozen .app bundle
+    (Contents/Resources is read-only and shared between users), we move to
+    ~/Library/Application Support/iMessage Exporter/ so the user's data is
+    persistent and writable across launches.
+    """
+    if getattr(sys, "frozen", False):
+        path = Path.home() / "Library" / "Application Support" / "iMessage Exporter"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return REPO_ROOT
+
+
+USER_DATA_DIR      = _user_data_dir()
 DEFAULT_MY_NAME    = "Me"
-DEFAULT_CSV_PATH   = REPO_ROOT / "contacts.csv"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "exports"
+DEFAULT_CSV_PATH   = USER_DATA_DIR / "contacts.csv"
+DEFAULT_OUTPUT_DIR = USER_DATA_DIR / "exports"
 DEFAULT_DB_PATH    = Path(os.path.expanduser("~/Library/Messages/chat.db"))
 
 # Default timezone is whatever the local machine is set to

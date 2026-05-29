@@ -11,6 +11,7 @@ The browser opens automatically to http://127.0.0.1:8765.
 """
 
 import sqlite3
+import sys
 import threading
 import time
 import webbrowser
@@ -43,7 +44,21 @@ HOST = "127.0.0.1"
 PORT = 8765
 
 REPO_ROOT = Path(__file__).resolve().parent
-STATIC_DIR = REPO_ROOT / "web" / "static"
+
+
+def _static_dir():
+    """Locate the bundled frontend.
+
+    When running from source, web/static/ lives next to app.py. When packaged
+    by py2app, the data_files we declared land in the bundle's Resources
+    folder, which is two levels up from the executable.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent.parent / "Resources" / "web" / "static"
+    return REPO_ROOT / "web" / "static"
+
+
+STATIC_DIR = _static_dir()
 
 app = FastAPI(title="iMessage Exporter")
 
@@ -182,18 +197,20 @@ def _participants_for_group(conn, chat_identifier):
 #  API: database status
 # ─────────────────────────────────────────────
 
+_IS_BUNDLED = bool(getattr(sys, "frozen", False))
+
+
 @app.get("/api/db-status")
 def db_status():
+    base = {
+        "db_path": str(DEFAULT_DB_PATH),
+        "bundled": _IS_BUNDLED,
+    }
     try:
         check_database_access(DEFAULT_DB_PATH)
-        return {"ok": True, "kind": None, "detail": None, "db_path": str(DEFAULT_DB_PATH)}
+        return {**base, "ok": True, "kind": None, "detail": None}
     except DatabaseAccessError as e:
-        return {
-            "ok": False,
-            "kind": e.kind,
-            "detail": e.detail,
-            "db_path": str(DEFAULT_DB_PATH),
-        }
+        return {**base, "ok": False, "kind": e.kind, "detail": e.detail}
 
 
 # ─────────────────────────────────────────────

@@ -65,9 +65,39 @@ exactly what to do, but here's the gist:
 
 ### 3. Run it
 
-You have two ways to use the tool:
+You have three ways to use the tool:
 
-#### Web UI (recommended)
+#### Standalone .app (best for sharing)
+
+```bash
+./build.sh
+```
+
+Produces `dist/iMessage Exporter.app` — a fully self-contained universal
+binary (~120 MB, runs on Apple Silicon and Intel) with Python and all
+dependencies bundled inside. Double-click to launch; the browser opens
+automatically.
+
+To share with someone else:
+
+```bash
+ditto -c -k --keepParent "dist/iMessage Exporter.app" "iMessage Exporter.app.zip"
+```
+
+Send them the `.zip`. On first launch, the recipient:
+
+1. **Right-click → Open** the app (Gatekeeper one-time bypass for
+   unsigned apps — needed because no Apple Developer Program account).
+2. **Grant Full Disk Access** in System Settings → Privacy & Security →
+   Full Disk Access. Add the app and toggle it on. Fully quit + reopen.
+3. **Allow Contacts access** when prompted (only matters if they want
+   to use the "Import from Contacts" / "Import groups" pickers).
+
+User data (contacts.csv + exports/) lives at
+`~/Library/Application Support/iMessage Exporter/` when run as a .app —
+the bundle itself stays read-only.
+
+#### Web UI from source
 
 ```bash
 pip install -r requirements.txt

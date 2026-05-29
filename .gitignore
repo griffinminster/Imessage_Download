@@ -5,3 +5,8 @@ exports/
 .venv/
 venv/
 .DS_Store
+
+# py2app build artifacts
+build/
+dist/
+*.egg-info/

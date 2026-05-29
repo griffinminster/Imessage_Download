@@ -22,22 +22,36 @@ $$(".tab-btn").forEach((btn) =>
 
 // ─── DB status banner ───────────────────────────────────────────
 
-const DB_GUIDANCE = {
-  not_macos: "This tool only works on macOS — Messages.app's database doesn't exist on other platforms.",
-  messages_never_set_up:
-    "Messages.app has never been opened on this Mac. Open it, sign in with your Apple ID, send/receive at least one message, then reload this page.",
-  permission_denied:
-    "Your terminal app needs Full Disk Access. Open System Settings → Privacy & Security → Full Disk Access, enable it for the app running this server, then fully quit and reopen it. See the README for the full walkthrough.",
-  corrupted_or_locked:
-    "The Messages database is locked. Quit Messages.app (⌘Q) and reload this page.",
-  unknown:
-    "Couldn't read the Messages database — see the terminal where you started the app for details.",
-};
+function dbGuidance(kind, bundled) {
+  const target = bundled ? "iMessage Exporter" : "your terminal app";
+  switch (kind) {
+    case "not_macos":
+      return "This tool only works on macOS — Messages.app's database doesn't exist on other platforms.";
+    case "messages_never_set_up":
+      return "Messages.app has never been opened on this Mac. Open it, sign in with your Apple ID, send/receive at least one message, then reload this page.";
+    case "permission_denied":
+      return (
+        `${target} needs Full Disk Access. Open System Settings → Privacy & Security → Full Disk Access, ` +
+        (bundled
+          ? "find iMessage Exporter in the list (click + and add it from /Applications if it's not there), toggle it on, then fully quit the app and reopen it."
+          : "enable it for the app running this server, then fully quit and reopen it. See the README for the full walkthrough.")
+      );
+    case "corrupted_or_locked":
+      return "The Messages database is locked. Quit Messages.app (⌘Q) and reload this page.";
+    default:
+      return bundled
+        ? "Couldn't read the Messages database — quit iMessage Exporter and try again."
+        : "Couldn't read the Messages database — see the terminal where you started the app for details.";
+  }
+}
+
+let RUNTIME_BUNDLED = false;
 
 async function checkDbStatus() {
   try {
     const res = await fetch("/api/db-status");
     const data = await res.json();
+    RUNTIME_BUNDLED = !!data.bundled;
     const banner = $("#db-banner");
     if (data.ok) {
       banner.classList.add("hidden");
@@ -45,9 +59,22 @@ async function checkDbStatus() {
     }
     banner.classList.remove("hidden");
     banner.classList.add("error");
+    const why =
+      data.kind === "permission_denied"
+        ? `<details class="banner-why">
+             <summary>Why does it need this?</summary>
+             <p>macOS keeps your iMessage history in a protected folder, so any app that wants to read it
+             needs your explicit permission. This is the same permission Apple's Mail.app, Time Machine,
+             and every third-party iMessage tool ask for.</p>
+             <p><strong>iMessage Exporter only reads</strong> (never edits or sends) your messages, runs
+             entirely on your Mac, and makes <strong>no internet connections</strong> — nothing about
+             your conversations leaves this computer. You can revoke the permission any time from the
+             same Settings panel.</p>
+           </details>`
+        : "";
     banner.innerHTML = `<strong>⚠️ Can't read the iMessage database.</strong><br/>${
-      DB_GUIDANCE[data.kind] || DB_GUIDANCE.unknown
-    }<br/><small>Path: <code>${data.db_path}</code></small>`;
+      dbGuidance(data.kind, RUNTIME_BUNDLED)
+    }${why}`;
     return false;
   } catch (e) {
     console.error(e);
@@ -350,7 +377,7 @@ async function openGroupPicker() {
       const data = await res.json().catch(() => ({}));
       const kind = data.detail?.kind || "unknown";
       groupStatus.textContent = "";
-      groupList.innerHTML = `<li class="picker-error">${escapeHtml(DB_GUIDANCE[kind] || "Couldn't load groups.")}</li>`;
+      groupList.innerHTML = `<li class="picker-error">${escapeHtml(dbGuidance(kind, RUNTIME_BUNDLED))}</li>`;
       return;
     }
     const data = await res.json();
@@ -559,7 +586,7 @@ $("#export-form").addEventListener("submit", async (e) => {
       const data = await res.json().catch(() => ({}));
       const msg =
         typeof data.detail === "object"
-          ? DB_GUIDANCE[data.detail.kind] || data.detail.detail
+          ? dbGuidance(data.detail.kind, RUNTIME_BUNDLED)
           : data.detail || "Export failed.";
       status.innerHTML = `<div class="line err">❌ ${escapeHtml(msg)}</div>`;
       return;
