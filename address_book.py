@@ -10,6 +10,7 @@ No third-party dependencies — `osascript` ships with macOS.
 """
 
 import subprocess
+import time
 from typing import Optional
 
 
@@ -93,6 +94,29 @@ class AddressBookError(Exception):
 
 
 _cache: Optional[list] = None
+_contacts_launched = False
+
+
+def _ensure_contacts_app_running():
+    """Launch Contacts.app once per process and wait for it to come up.
+
+    `tell application "Contacts" to launch` is async and returns before the
+    app is actually ready, which leaves the next `tell` call with a -600
+    "Application isn't running" error. Going through `open -a` uses Launch
+    Services properly, then we wait briefly for the app to register.
+    """
+    global _contacts_launched
+    if _contacts_launched:
+        return
+    try:
+        subprocess.run(
+            ["open", "-g", "-a", "Contacts"],
+            capture_output=True, timeout=10,
+        )
+        time.sleep(1.5)
+    except Exception:
+        pass  # best-effort; let the AppleScript surface its own error
+    _contacts_launched = True
 
 
 def _run_osascript(script: str, timeout: int = 30) -> str:
@@ -102,6 +126,11 @@ def _run_osascript(script: str, timeout: int = 30) -> str:
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
+            # Pin UTF-8 explicitly. Inside an .app bundle launched by Finder,
+            # LANG is unset → Python defaults to ASCII, which crashes on any
+            # contact name containing a non-ASCII character (very common).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except FileNotFoundError as e:
@@ -117,7 +146,12 @@ def _run_osascript(script: str, timeout: int = 30) -> str:
         # case across macOS versions.
         if "-1743" in err or "not authorized" in low or "not allowed" in low:
             raise AddressBookError("permission_denied", err)
-        if "application isn't running" in low or "can't get application" in low:
+        if (
+            "application isn't running" in low
+            or "isn’t running" in low
+            or "can't get application" in low
+            or "-600" in err
+        ):
             raise AddressBookError("contacts_app_missing", err)
         raise AddressBookError("unknown", err or f"osascript exited {result.returncode}")
 
@@ -126,6 +160,7 @@ def _run_osascript(script: str, timeout: int = 30) -> str:
 
 def check_access() -> None:
     """Quick probe. Raises AddressBookError on failure, returns None on success."""
+    _ensure_contacts_app_running()
     _run_osascript(_PROBE_SCRIPT)
 
 
@@ -143,6 +178,7 @@ def fetch_address_book(refresh: bool = False) -> list:
     if _cache is not None and not refresh:
         return _cache
 
+    _ensure_contacts_app_running()
     # 60s is plenty for the bulk-fetch script even on large address books.
     raw = _run_osascript(_DUMP_SCRIPT, timeout=60)
     contacts = _parse_dump(raw)

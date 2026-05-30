@@ -14,6 +14,7 @@ function showTab(name) {
   document.body.dataset.activeTab = name;
   if (name === "view") loadConversations();
   if (name === "search") loadSearchScope();
+  if (name === "export") loadSettings();
 }
 
 $$(".tab-btn").forEach((btn) =>
@@ -154,16 +155,25 @@ async function removeContact(identifier) {
 
 // ─── macOS Contacts picker + autocomplete ──────────────────────
 
-const AB_GUIDANCE = {
-  permission_denied:
-    "Contacts access is blocked. Open System Settings → Privacy & Security → Contacts and enable access for the terminal app running this server, then try again.",
-  contacts_app_missing:
-    "Contacts.app didn't respond. Make sure it's installed and try again.",
-  osascript_missing:
-    "osascript wasn't found — is this actually macOS?",
-  unknown:
-    "Couldn't read Contacts. See the terminal where you started the app for details.",
-};
+function abGuidance(kind, bundled, detail) {
+  switch (kind) {
+    case "permission_denied":
+      return bundled
+        ? "Contacts access is blocked. Open System Settings → Privacy & Security → Contacts, find iMessage Exporter, toggle it on, then try again."
+        : "Contacts access is blocked. Open System Settings → Privacy & Security → Contacts and enable access for the terminal app running this server, then try again.";
+    case "contacts_app_missing":
+      return "Couldn't start Contacts.app. Open it manually once (Applications → Contacts), then try again.";
+    case "osascript_missing":
+      return "osascript wasn't found — is this actually macOS?";
+    default:
+      return (
+        (bundled
+          ? "Couldn't read Contacts — try fully quitting iMessage Exporter and reopening."
+          : "Couldn't read Contacts. See the terminal where you started the app for details.") +
+        (detail ? ` (${detail})` : "")
+      );
+  }
+}
 
 let addressBookCache = null; // [{name, phones:[{label,value}], emails:[...]}]
 let addressBookPromise = null;
@@ -179,7 +189,8 @@ async function loadAddressBook(refresh = false) {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       const kind = (data.detail && data.detail.kind) || "unknown";
-      const err = new Error(AB_GUIDANCE[kind] || AB_GUIDANCE.unknown);
+      const detail = data.detail && data.detail.detail;
+      const err = new Error(abGuidance(kind, RUNTIME_BUNDLED, detail));
       err.kind = kind;
       throw err;
     }
@@ -565,6 +576,90 @@ function hideSuggestions() {
   suggestionIndex = -1;
 }
 
+// ─── Export folder settings ────────────────────────────────────
+
+const folderInput = $("#folder-input");
+const folderSaveBtn = $("#folder-save-btn");
+const folderResetBtn = $("#folder-reset-btn");
+const folderBrowseBtn = $("#folder-browse-btn");
+const folderError = $("#folder-error");
+
+let settingsCache = null;
+
+async function loadSettings() {
+  try {
+    const res = await fetch("/api/settings");
+    const data = await res.json();
+    settingsCache = data;
+    folderInput.value = data.output_dir;
+    folderInput.placeholder = data.default_output_dir;
+    folderResetBtn.classList.toggle("hidden", data.is_default);
+    folderError.classList.add("hidden");
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function showFolderError(msg) {
+  folderError.textContent = msg;
+  folderError.classList.remove("hidden");
+}
+
+async function saveSettings(newPath) {
+  folderSaveBtn.disabled = true;
+  folderSaveBtn.innerHTML = `<span class="spinner"></span>Saving…`;
+  folderError.classList.add("hidden");
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ output_dir: newPath }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showFolderError(data.detail || "Couldn't save folder.");
+      return;
+    }
+    settingsCache = data;
+    folderInput.value = data.output_dir;
+    folderResetBtn.classList.toggle("hidden", data.is_default);
+    folderSaveBtn.textContent = "Saved ✓";
+    setTimeout(() => { folderSaveBtn.textContent = "Save"; }, 1400);
+  } finally {
+    folderSaveBtn.disabled = false;
+    if (folderSaveBtn.textContent.startsWith("Saving")) folderSaveBtn.textContent = "Save";
+  }
+}
+
+$("#folder-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  saveSettings(folderInput.value.trim());
+});
+
+folderResetBtn.addEventListener("click", () => saveSettings(null));
+
+folderBrowseBtn.addEventListener("click", async () => {
+  folderBrowseBtn.disabled = true;
+  folderBrowseBtn.innerHTML = `<span class="spinner"></span>Choose…`;
+  try {
+    const res = await fetch("/api/browse-folder", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showFolderError(data.detail || "Couldn't open folder picker.");
+      return;
+    }
+    if (data.cancelled) return;
+    if (data.path) {
+      folderInput.value = data.path;
+      folderError.classList.add("hidden");
+      folderInput.focus();
+    }
+  } finally {
+    folderBrowseBtn.disabled = false;
+    folderBrowseBtn.textContent = "Browse…";
+  }
+});
+
 // ─── Export ─────────────────────────────────────────────────────
 
 $("#export-form").addEventListener("submit", async (e) => {
@@ -938,6 +1033,16 @@ function escapeHtml(s) {
 }
 
 // ─── Boot ───────────────────────────────────────────────────────
+
+// Heartbeat — tells the server the browser tab is still open. When the
+// user closes the tab these pings stop, the server's watchdog notices, and
+// the .app exits. Only enforced in bundled mode; in dev the server keeps
+// running so you can reload freely.
+function pingHeartbeat() {
+  fetch("/api/heartbeat", { method: "POST", keepalive: true }).catch(() => {});
+}
+pingHeartbeat();
+setInterval(pingHeartbeat, 5000);
 
 (async function init() {
   document.body.dataset.activeTab = "contacts";

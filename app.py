@@ -10,6 +10,8 @@ serves a single static frontend. Run with:
 The browser opens automatically to http://127.0.0.1:8765.
 """
 
+import os
+import signal
 import sqlite3
 import sys
 import threading
@@ -33,9 +35,13 @@ from export_imessages import (
     apple_timestamp_to_local,
     check_database_access,
     export_conversation,
+    get_output_dir,
+    load_settings,
     normalize_identifier,
     query_messages,
+    save_settings,
 )
+import subprocess
 from add_contacts import load_contacts, save_contacts
 from address_book import AddressBookError, check_access, fetch_address_book
 
@@ -282,6 +288,121 @@ def address_book(refresh: int = 0):
 
 
 # ─────────────────────────────────────────────
+#  API: settings (export folder)
+# ─────────────────────────────────────────────
+
+class SettingsIn(BaseModel):
+    output_dir: str | None = None  # None = reset to default
+
+
+def _settings_payload():
+    active = get_output_dir()
+    return {
+        "output_dir": str(active),
+        "default_output_dir": str(DEFAULT_OUTPUT_DIR),
+        "is_default": str(active) == str(DEFAULT_OUTPUT_DIR),
+        "bundled": _IS_BUNDLED,
+    }
+
+
+@app.get("/api/settings")
+def get_settings():
+    return _settings_payload()
+
+
+@app.put("/api/settings")
+def update_settings(payload: SettingsIn):
+    settings = load_settings()
+
+    raw = (payload.output_dir or "").strip()
+    if not raw:
+        # Reset to default — drop the override.
+        settings.pop("output_dir", None)
+        save_settings(settings)
+        return _settings_payload()
+
+    # Validate the requested path: expand ~, resolve, and try to create it.
+    try:
+        path = Path(raw).expanduser()
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Couldn't parse path: {raw!r}")
+
+    if not path.is_absolute():
+        raise HTTPException(
+            status_code=400,
+            detail="Please use an absolute path (start it with / or ~/).",
+        )
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{path} exists but isn't a folder.",
+        )
+    except PermissionError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No permission to create or write to {path}.",
+        )
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Couldn't use {path}: {e}")
+
+    # Confirm we can actually write a file there.
+    probe = path / ".imessage-exporter-write-test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{path} isn't writable.",
+        )
+
+    settings["output_dir"] = str(path.resolve())
+    if not save_settings(settings):
+        raise HTTPException(status_code=500, detail="Couldn't save settings.")
+
+    return _settings_payload()
+
+
+@app.post("/api/browse-folder")
+def browse_folder():
+    """Open a native macOS folder picker, return the selected POSIX path.
+
+    Uses AppleScript via osascript so we get the real "choose folder" panel
+    instead of a browser file picker (which can't return absolute paths).
+    """
+    script = (
+        'POSIX path of (choose folder with prompt '
+        '"Pick a folder for iMessage Exporter to save .txt files into")'
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=300,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="osascript not available.")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="Folder picker timed out.")
+
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        if "User canceled" in err or "-128" in err:
+            return {"cancelled": True}
+        raise HTTPException(status_code=500, detail=err or "Folder picker failed.")
+
+    path = result.stdout.strip()
+    # AppleScript returns trailing slash; drop it for consistency.
+    if path.endswith("/") and len(path) > 1:
+        path = path[:-1]
+    return {"path": path}
+
+
+# ─────────────────────────────────────────────
 #  API: group chats from chat.db
 # ─────────────────────────────────────────────
 
@@ -375,7 +496,8 @@ def run_export_api(payload: ExportIn):
     if not contacts:
         raise HTTPException(status_code=400, detail="No contacts to export. Add some first.")
 
-    Path(DEFAULT_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    output_dir = get_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
     conn = sqlite3.connect(f"file:{DEFAULT_DB_PATH}?mode=ro", uri=True)
@@ -389,7 +511,7 @@ def run_export_api(payload: ExportIn):
                     handles = _participants_for_group(conn, chat_id)
                     name_map = _build_handle_name_map(handles)
                 export_conversation(
-                    conn, name, identifier, DEFAULT_OUTPUT_DIR,
+                    conn, name, identifier, output_dir,
                     payload.my_name, LOCAL_TZ,
                     sender_name_map=name_map,
                 )
@@ -414,7 +536,7 @@ def run_export_api(payload: ExportIn):
 
     return {
         "my_name": payload.my_name,
-        "output_dir": str(DEFAULT_OUTPUT_DIR),
+        "output_dir": str(output_dir),
         "conversations": results,
     }
 
@@ -432,7 +554,7 @@ def list_conversations():
     the frontend can fetch the conversation by the canonical name. Also
     includes `is_group` so the sidebar can split individuals vs groups.
     """
-    output_dir = Path(DEFAULT_OUTPUT_DIR)
+    output_dir = get_output_dir()
     if not output_dir.exists():
         return {"conversations": []}
 
@@ -531,7 +653,7 @@ def search(q: str, contact: str | None = None, offset: int = 0, limit: int = 10)
             detail={"kind": e.kind, "detail": e.detail},
         )
 
-    output_dir = Path(DEFAULT_OUTPUT_DIR)
+    output_dir = get_output_dir()
     exported_stems = (
         {p.stem for p in output_dir.glob("*.txt")} if output_dir.exists() else set()
     )
@@ -596,11 +718,66 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 # ─────────────────────────────────────────────
+#  Heartbeat — auto-quit when the browser tab closes
+# ─────────────────────────────────────────────
+#
+# The frontend POSTs /api/heartbeat every 5s while the UI is open. When the
+# user closes the tab those pings stop; ~12s later this watchdog sends SIGINT
+# so uvicorn shuts down cleanly and the .app exits.
+#
+# The watchdog is bundled-only — running from source, you start the server
+# yourself and Ctrl-C is the natural way to stop it.
+
+_HEARTBEAT_TIMEOUT = 12.0
+_last_heartbeat_at: float | None = None
+_heartbeat_lock = threading.Lock()
+
+
+@app.post("/api/heartbeat")
+def heartbeat():
+    global _last_heartbeat_at
+    with _heartbeat_lock:
+        _last_heartbeat_at = time.monotonic()
+    return {"ok": True}
+
+
+def _heartbeat_watchdog():
+    """Quit the process after HEARTBEAT_TIMEOUT seconds without a heartbeat.
+
+    Doesn't start counting until the first heartbeat arrives, so a slow first
+    run (granting Full Disk Access, picking permissions, etc.) doesn't kill
+    the app before the browser even loads the UI.
+    """
+    # Wait indefinitely for the first heartbeat.
+    while True:
+        with _heartbeat_lock:
+            seen = _last_heartbeat_at is not None
+        if seen:
+            break
+        time.sleep(1)
+
+    # Now actually watch.
+    while True:
+        time.sleep(2)
+        with _heartbeat_lock:
+            elapsed = time.monotonic() - _last_heartbeat_at
+        if elapsed > _HEARTBEAT_TIMEOUT:
+            print(f"\n→ browser tab closed ({elapsed:.0f}s without heartbeat); shutting down.")
+            try:
+                os.kill(os.getpid(), signal.SIGINT)
+            except Exception:
+                os._exit(0)
+            return
+
+
+# ─────────────────────────────────────────────
 #  Launch
 # ─────────────────────────────────────────────
 
 def _open_browser_when_ready():
     """Give uvicorn a moment to bind the port, then pop the browser open."""
+    if os.environ.get("IMESSAGE_EXPORTER_NO_BROWSER"):
+        return
     time.sleep(0.8)
     webbrowser.open(f"http://{HOST}:{PORT}")
 
@@ -615,6 +792,11 @@ def main():
     print()
 
     threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+
+    # In bundled mode, the .app has no terminal — closing the browser tab is
+    # the only intuitive way to "quit". Start the watchdog so it can.
+    if _IS_BUNDLED:
+        threading.Thread(target=_heartbeat_watchdog, daemon=True).start()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
 

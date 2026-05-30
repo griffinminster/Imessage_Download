@@ -128,9 +128,24 @@
   <!-- ───── Export ───── -->
   <section id="tab-export" class="tab-panel">
     <h2>Run an export</h2>
-    <p class="hint">This will pull all messages for every contact and save one read-only <code>.txt</code> file per conversation to <code>exports/</code>. You'll then be able to view them as chat bubbles in the next tab.</p>
+    <p class="hint">This will pull all messages for every contact and save one read-only <code>.txt</code> file per conversation. You'll then be able to view them as chat bubbles in the next tab.</p>
 
     <div class="card">
+      <div class="card-header-row">
+        <h3>Save .txt files to</h3>
+        <button type="button" id="folder-reset-btn" class="danger hidden">Reset to default</button>
+      </div>
+      <form id="folder-form" class="row">
+        <input type="text" id="folder-input" placeholder="/Users/you/Documents/iMessage Exports" autocomplete="off" />
+        <button type="button" id="folder-browse-btn" class="secondary">Browse…</button>
+        <button type="submit" id="folder-save-btn">Save</button>
+      </form>
+      <p class="hint" id="folder-hint" style="margin-top: 0.5rem;">Use <code>~/</code> for your home folder. Switching the location won't move existing exports.</p>
+      <p id="folder-error" class="error hidden" style="margin-top: 0.5rem;"></p>
+    </div>
+
+    <div class="card">
+      <h3>Run export</h3>
       <form id="export-form" class="row">
         <label for="my-name">Your name (shown on your messages):</label>
         <input type="text" id="my-name" placeholder="Me" value="Me" required />

@@ -14,6 +14,7 @@ Or imported and called from main.py.
 import sys
 import sqlite3
 import csv
+import json
 import os
 import stat
 import platform
@@ -25,29 +26,84 @@ from pathlib import Path
 # ─────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parent
+_IS_BUNDLED = bool(getattr(sys, "frozen", False))
 
 
 def _user_data_dir():
-    """Where to read/write contacts.csv and exports/.
+    """Internal app-state directory for contacts.csv and settings.json.
 
     When running from source (dev), we keep everything in the repo root so
     git status is the source of truth. When running as a frozen .app bundle
-    (Contents/Resources is read-only and shared between users), we move to
+    (Contents/Resources is read-only), we move to
     ~/Library/Application Support/iMessage Exporter/ so the user's data is
     persistent and writable across launches.
     """
-    if getattr(sys, "frozen", False):
+    if _IS_BUNDLED:
         path = Path.home() / "Library" / "Application Support" / "iMessage Exporter"
         path.mkdir(parents=True, exist_ok=True)
         return path
     return REPO_ROOT
 
 
-USER_DATA_DIR      = _user_data_dir()
-DEFAULT_MY_NAME    = "Me"
-DEFAULT_CSV_PATH   = USER_DATA_DIR / "contacts.csv"
-DEFAULT_OUTPUT_DIR = USER_DATA_DIR / "exports"
-DEFAULT_DB_PATH    = Path(os.path.expanduser("~/Library/Messages/chat.db"))
+def _default_output_dir():
+    """User-facing default for where exported .txt files land.
+
+    Bundled: ~/Documents/iMessage Exports/  — discoverable in Finder.
+    Dev: REPO_ROOT/exports/                 — convenient for developing.
+    """
+    if _IS_BUNDLED:
+        return Path.home() / "Documents" / "iMessage Exports"
+    return REPO_ROOT / "exports"
+
+
+USER_DATA_DIR        = _user_data_dir()
+SETTINGS_PATH        = USER_DATA_DIR / "settings.json"
+DEFAULT_MY_NAME      = "Me"
+DEFAULT_CSV_PATH     = USER_DATA_DIR / "contacts.csv"
+DEFAULT_OUTPUT_DIR   = _default_output_dir()
+DEFAULT_DB_PATH      = Path(os.path.expanduser("~/Library/Messages/chat.db"))
+
+
+# ─────────────────────────────────────────────
+#  Settings (per-user overrides for output dir)
+# ─────────────────────────────────────────────
+
+def load_settings():
+    """Read settings.json. Returns {} if missing or corrupt."""
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(settings):
+    """Persist settings.json. Returns True on success."""
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.write_text(
+            json.dumps(settings, indent=2), encoding="utf-8"
+        )
+        return True
+    except OSError:
+        return False
+
+
+def get_output_dir():
+    """Resolve the active export folder.
+
+    If the user has set a custom output_dir in settings.json and it's still
+    a usable directory (creatable + writable), use it. Otherwise fall back
+    to the platform default.
+    """
+    custom = (load_settings() or {}).get("output_dir")
+    if custom:
+        try:
+            path = Path(custom).expanduser().resolve()
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except OSError:
+            pass  # custom path no longer valid → silently fall back
+    return DEFAULT_OUTPUT_DIR
 
 # Default timezone is whatever the local machine is set to
 LOCAL_TZ = datetime.now().astimezone().tzinfo
